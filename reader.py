@@ -2,8 +2,7 @@ import asyncio
 import html as html_lib
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telegram import Bot
-from config import API_ID, API_HASH, PHONE_NUMBER, BOT_TOKEN, TELETHON_SESSION
+from config import API_ID, API_HASH, PHONE_NUMBER, TELETHON_SESSION
 from database import (
     save_message, assign_categories, add_message_hash,
     mark_categorization_failed, get_uncategorized_messages,
@@ -13,7 +12,13 @@ from categorizer import categorize_message, CategorizationError
 
 client = None
 reader_task = None
-_bot = Bot(BOT_TOKEN)
+_bot = None  # impostato da bot.py con set_bot(), riusa il Bot già inizializzato dall'Application
+
+def set_bot(bot_instance):
+    """Chiamato da bot.py dopo app.initialize(), così le notifiche usano
+    lo stesso Bot già pronto invece di crearne uno scollegato e non inizializzato."""
+    global _bot
+    _bot = bot_instance
 
 # Dopo questo numero di tentativi falliti, il messaggio viene comunque
 # etichettato con la categoria di fallback per non restare in coda per sempre
@@ -116,6 +121,9 @@ async def retry_pending_categorizations():
 async def notify_favorites(category_ids, channel, tg_message_id, text):
     """Invia una notifica istantanea a chi ha messo tra i preferiti una
     delle categorie appena assegnate a questo messaggio."""
+    if _bot is None:
+        print("⚠️ Notifiche preferiti saltate: bot non ancora pronto (set_bot non chiamato)")
+        return
     notified_chats = set()
     link = f"https://t.me/{channel}/{tg_message_id}"
     for cat_id in category_ids:

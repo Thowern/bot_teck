@@ -3,7 +3,7 @@ import threading
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from config import BOT_TOKEN
 from handlers import register_handlers, start
-from reader import start_reader, retry_pending_categorizations
+from reader import start_reader, retry_pending_categorizations, set_bot
 from database import delete_expired_messages
 from ping import app as ping_app
 
@@ -29,6 +29,7 @@ async def main():
     app = Application.builder().token(BOT_TOKEN).build()
     register_handlers(app)
     await app.initialize()
+    set_bot(app.bot)  # riusa questo bot già inizializzato per le notifiche preferiti
     await app.start()
     await app.updater.start_polling()
     print("🤖 Hub Offerte avviato!")
