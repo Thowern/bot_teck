@@ -1,28 +1,29 @@
-"""
-Esegui questo script UNA SOLA VOLTA in locale (dove puoi digitare il codice
-di verifica Telegram da tastiera) per generare una StringSession.
-
-Uso:
-    python generate_session.py
-
-Al termine ti stampa una lunga stringa: copiala e mettila su Render come
-variabile d'ambiente TELETHON_SESSION. Da quel momento il reader (reader.py)
-userà quella stringa invece di un file su disco, quindi funzionerà anche
-su un filesystem effimero come quello di Render.
-
-NON committare mai questa stringa su Git: equivale alle credenziali di
-accesso al tuo account Telegram.
-"""
+import asyncio
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from config import API_ID, API_HASH, PHONE_NUMBER
+from config import API_ID, API_HASH
+import qrcode
 
-with TelegramClient(StringSession(), API_ID, API_HASH) as client:
-    client.start(phone=PHONE_NUMBER)
+async def main():
+    client = TelegramClient(StringSession(), API_ID, API_HASH)
+    await client.connect()
+    qr_login = await client.qr_login()
+
+    # Crea e salva il QR come immagine
+    img = qrcode.make(qr_login.url)
+    img.save("qrcode.png")
+    print("\n✅ QR salvato come 'qrcode.png' nella cartella corrente.")
+    print("📱 Aprilo con un visualizzatore di immagini e scannerizzalo con l'app Telegram.")
+    print("   (Apri Telegram → Impostazioni → Dispositivi → Collega dispositivo)\n")
+
+    print("⏳ In attesa della scansione...")
+    await qr_login.wait()
     session_string = client.session.save()
     print("\n" + "=" * 60)
-    print("✅ Login riuscito. Copia questa stringa:")
-    print("=" * 60)
+    print("✅ Sessione generata. Copia questa stringa:")
     print(session_string)
     print("=" * 60)
-    print("Mettila su Render come variabile d'ambiente: TELETHON_SESSION")
+    await client.disconnect()
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -1,7 +1,10 @@
 import asyncio
 import html as html_lib
+import logging
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.errors import UserAlreadyParticipantError, ChannelPrivateError, FloodWaitError
 from config import API_ID, API_HASH, PHONE_NUMBER, TELETHON_SESSION
 from database import (
     save_message, assign_categories, add_message_hash,
@@ -10,19 +13,16 @@ from database import (
 )
 from categorizer import categorize_message, CategorizationError
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 client = None
-reader_task = None
-_bot = None  # impostato da bot.py con set_bot(), riusa il Bot già inizializzato dall'Application
+_bot = None
 
 def set_bot(bot_instance):
-    """Chiamato da bot.py dopo app.initialize(), così le notifiche usano
-    lo stesso Bot già pronto invece di crearne uno scollegato e non inizializzato."""
     global _bot
     _bot = bot_instance
 
-# Dopo questo numero di tentativi falliti, il messaggio viene comunque
-# etichettato con la categoria di fallback per non restare in coda per sempre
-# (es. se il messaggio stesso è malformato, non un problema di Groq).
 MAX_CATEGORIZATION_ATTEMPTS = 15
 RETRY_INTERVAL_SECONDS = 120
 
@@ -45,19 +45,66 @@ async def start_reader():
 
             print(f"📡 Monitoraggio: {', '.join(channel_usernames)}")
 
-            # In locale (senza TELETHON_SESSION nel .env) usa un file su disco
-            # e la prima volta chiede il codice via input() sulla console.
-            # Su Render (o altro host con filesystem effimero) imposta invece
-            # TELETHON_SESSION con la stringa generata da generate_session.py:
-            # in quel caso non serve alcun login interattivo.
             session = StringSession(TELETHON_SESSION) if TELETHON_SESSION else "session"
             client = TelegramClient(session, API_ID, API_HASH)
             await client.start(phone=PHONE_NUMBER)
             print("📡 Client connesso!")
 
-            @client.on(events.NewMessage(chats=channel_usernames))
+            chat_entities = []
+            for username in channel_usernames:
+                try:
+                    entity = await client.get_entity(username)
+                    print(f"✅ Risolto @{username} → ID {entity.id}")
+
+                    try:
+                        await client(JoinChannelRequest(username))
+                        print(f"✅ Iscritto/già iscritto a @{username}")
+                    except UserAlreadyParticipantError:
+                        print(f"✅ Già iscritto a @{username}")
+                    except ChannelPrivateError:
+                        print(f"❌ @{username} è privato o non accessibile: saltato")
+                        continue
+                    except FloodWaitError as e:
+                        print(f"⏳ Flood wait: aspetto {e.seconds}s")
+                        await asyncio.sleep(e.seconds)
+                        print(f"⚠️ @{username} saltato per flood")
+                        continue
+                    except Exception as e:
+                        print(f"⚠️ Impossibile iscriversi a @{username}: {e}")
+                        continue
+
+                    chat_entities.append(entity)
+                    print(f"✅ @{username} aggiunto all'ascolto")
+
+                except Exception as e:
+                    print(f"❌ Errore risoluzione @{username}: {e}")
+                    continue
+
+            if not chat_entities:
+                print("❌ Nessun canale valido. Aspetto...")
+                await asyncio.sleep(60)
+                continue
+
+            # Handler principale per i canali monitorati
+            @client.on(events.NewMessage(chats=chat_entities))
             async def handler(event):
+                # LOG DI DEBUG: stampa ogni messaggio ricevuto da canali monitorati
+                chat = await event.get_chat()
+                username = chat.username if chat.username else str(chat.id)
+                text = event.message.text or "[nessun testo]"
+                logger.info(f"📨 DEBUG - Messaggio ricevuto da @{username}: {text[:100]}...")
                 await process_message(event.message)
+
+            # Handler di debug OPZIONALE: stampa TUTTI i messaggi (anche da canali non monitorati)
+            # Decommenta le due righe seguenti per abilitare
+            # @client.on(events.NewMessage)
+            # async def debug_all(event):
+            #     chat = await event.get_chat()
+            #     username = chat.username if chat.username else str(chat.id)
+            #     text = event.message.text or "[nessun testo]"
+            #     logger.info(f"🐞 DEBUG ALL - Messaggio da {username}: {text[:50]}...")
+
+            print(f"👂 In ascolto attivo su {len(chat_entities)} canali.")
 
             try:
                 await asyncio.wait_for(client.run_until_disconnected(), timeout=3600)
@@ -73,56 +120,49 @@ async def process_message(message):
     try:
         text = message.text
         if not text:
+            logger.info("📭 Messaggio senza testo, ignorato.")
             return
 
         channel = message.chat.username or str(message.chat.id)
-        print(f"📩 Messaggio da @{channel}: {text[:50]}...")
+        logger.info(f"📩 Messaggio da @{channel}: {text[:100]}... (lunghezza {len(text)})")
 
         msg_id = save_message(text, channel, message.id)
         add_message_hash(msg_id, text)
         await try_categorize(msg_id, text, channel, message.id)
 
     except Exception as e:
-        print(f"❌ Errore processamento: {e}")
+        logger.error(f"❌ Errore processamento: {e}", exc_info=True)
 
 async def try_categorize(msg_id, text, channel, tg_message_id):
-    """Prova a categorizzare un messaggio. Se Groq fallisce (rate limit,
-    modello giù, ecc.) NON assegna un fallback subito: il messaggio resta
-    'non categorizzato' e verrà ritentato dal worker di coda."""
     try:
+        logger.info(f"🔄 Tentativo categorizzazione per messaggio {msg_id}")
         category_ids = categorize_message(text)
         assign_categories(msg_id, category_ids)
-        print(f"🏷️ Categorie assegnate: {category_ids}")
+        logger.info(f"🏷️ Categorie assegnate: {category_ids}")
         await notify_favorites(category_ids, channel, tg_message_id, text)
     except CategorizationError as e:
         attempts = mark_categorization_failed(msg_id)
+        logger.warning(f"⏳ Categorizzazione fallita (tentativo {attempts}/{MAX_CATEGORIZATION_ATTEMPTS}): {e}")
         if attempts >= MAX_CATEGORIZATION_ATTEMPTS:
-            print(f"⚠️ Troppi tentativi falliti per il messaggio {msg_id} ({attempts}), assegno categoria di fallback")
+            logger.warning(f"⚠️ Troppi tentativi falliti per il messaggio {msg_id} ({attempts}), assegno categoria di fallback (ID 2)")
             assign_categories(msg_id, [2])
             await notify_favorites([2], channel, tg_message_id, text)
-        else:
-            print(f"⏳ Categorizzazione in coda (tentativo {attempts}/{MAX_CATEGORIZATION_ATTEMPTS}): {e}")
 
 async def retry_pending_categorizations():
-    """Worker in background: ogni RETRY_INTERVAL_SECONDS riprova a
-    categorizzare i messaggi rimasti in coda per un fallimento tecnico
-    (es. rate limit Groq) invece di scaricarli su 'Tech Generale'."""
     while True:
         await asyncio.sleep(RETRY_INTERVAL_SECONDS)
         try:
             pending = get_uncategorized_messages(limit=20)
             if pending:
-                print(f"🔁 Ricategorizzazione in coda: {len(pending)} messaggi da riprovare")
+                logger.info(f"🔁 Ricategorizzazione in coda: {len(pending)} messaggi da riprovare")
             for m in pending:
                 await try_categorize(m["id"], m["raw_text"], m["channel_username"], m["message_id"])
         except Exception as e:
-            print(f"❌ Errore nel worker di retry categorizzazione: {e}")
+            logger.error(f"❌ Errore nel worker di retry categorizzazione: {e}", exc_info=True)
 
 async def notify_favorites(category_ids, channel, tg_message_id, text):
-    """Invia una notifica istantanea a chi ha messo tra i preferiti una
-    delle categorie appena assegnate a questo messaggio."""
     if _bot is None:
-        print("⚠️ Notifiche preferiti saltate: bot non ancora pronto (set_bot non chiamato)")
+        logger.warning("⚠️ Notifiche preferiti saltate: bot non ancora pronto")
         return
     notified_chats = set()
     link = f"https://t.me/{channel}/{tg_message_id}"
@@ -140,7 +180,7 @@ async def notify_favorites(category_ids, channel, tg_message_id, text):
             try:
                 await _bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
             except Exception as e:
-                print(f"❌ Notifica preferiti fallita per chat {chat_id}: {e}")
+                logger.error(f"❌ Notifica preferiti fallita per chat {chat_id}: {e}")
 
 async def restart_reader():
     global client

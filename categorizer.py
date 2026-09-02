@@ -1,21 +1,29 @@
 import json
 import re
+import logging
+import time
 from groq import Groq
 from config import GROQ_API_KEY, GROQ_MODEL
 from database import get_categories
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-
 class CategorizationError(Exception):
-    """Errore tecnico (rate limit, API giù, risposta malformata ecc).
-    Chi chiama categorize_message deve mettere il messaggio in coda
-    e riprovare più tardi, SENZA assegnare una categoria fallback subito."""
     pass
 
+# Lista di modelli da provare in ordine di preferenza
+MODEL_FALLBACKS = [
+    "groq/compound",
+    "groq/compound-mini",
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
+    "llama-3.1-8b-instant",
+]
 
 def build_category_tree(categories, parent_id=None, indent=0):
-    """Costruisce una stringa leggibile delle categorie per il prompt"""
     lines = []
     for cat in categories:
         if cat["parent_id"] == parent_id:
@@ -24,21 +32,19 @@ def build_category_tree(categories, parent_id=None, indent=0):
             lines.extend(build_category_tree(categories, cat["id"], indent + 1))
     return lines
 
+_last_request_time = 0
+MIN_INTERVAL = 0.5
+
 def categorize_message(text):
-    """Chiama Groq per categorizzare il messaggio.
-    Solleva CategorizationError su qualsiasi problema tecnico (rate limit,
-    errore di rete, modello non disponibile, risposta non parsabile):
-    il chiamante deve rimettere il messaggio in coda, NON assegnare un
-    fallback silenzioso."""
+    global _last_request_time
     if not client:
-        raise CategorizationError("Groq client non configurato (GROQ_API_KEY mancante)")
+        raise CategorizationError("Groq client non configurato")
 
     categories = get_categories()
     tree = build_category_tree(categories)
     category_list = "\n".join(tree)
 
-    prompt = f"""
-Sei un assistente che categorizza messaggi di offerte.
+    prompt = f"""Sei un assistente che categorizza messaggi di offerte.
 
 Messaggio:
 {text}
@@ -47,35 +53,63 @@ Categorie disponibili:
 {category_list}
 
 Regole:
-- Assegna ALMENO UNA categoria al messaggio.
-- Se il messaggio contiene più offerte, assegna TUTTE le categorie rilevanti.
-- Se non appartiene a nessuna categoria, assegna la categoria generica "Tech Generale" (ID: 2).
-- Restituisci SOLO un array JSON di ID.
+- Assegna ALMENO UNA categoria.
+- Restituisci SOLO un array JSON di ID. Esempio: [1, 3, 5]
+- Se non appartiene a nessuna categoria, usa [2] (Tech Generale).
+- Non aggiungere altro testo, solo l'array.
 
-Esempio: [1, 3, 5]
-
-Ora, rispondi con il JSON:
+Rispondi con l'array JSON.
 """
 
-    try:
-        response = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=200
-        )
-        result = response.choices[0].message.content.strip()
-        json_match = re.search(r'\[.*\]', result, re.DOTALL)
-        if json_match:
-            ids = json.loads(json_match.group(0))
-            parsed = [int(i) for i in ids if isinstance(i, int)]
-            if parsed:
-                return parsed
-        # Risposta vuota o non parsabile: è un fallimento tecnico, non un
-        # "nessuna categoria adatta" (il modello DEVE sempre restituirne una).
-        raise CategorizationError(f"Risposta non valida dal modello: {result[:200]!r}")
-    except CategorizationError:
-        raise
-    except Exception as e:
-        # Qui finiscono rate limit, errori di rete, modello dismesso, ecc.
-        raise CategorizationError(str(e))
+    # Rate limiting
+    now = time.time()
+    elapsed = now - _last_request_time
+    if elapsed < MIN_INTERVAL:
+        time.sleep(MIN_INTERVAL - elapsed)
+    _last_request_time = time.time()
+
+    # Prova i modelli in sequenza
+    models_to_try = [GROQ_MODEL] + [m for m in MODEL_FALLBACKS if m != GROQ_MODEL]
+    last_error = None
+
+    for model in models_to_try:
+        try:
+            logger.info(f"📤 Tentativo con modello: {model}")
+            logger.info(f"📝 Messaggio: {text[:200]}...")
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Rispondi solo con un array JSON valido, nient'altro."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                max_tokens=100
+            )
+            result = response.choices[0].message.content.strip()
+            logger.info(f"📥 Risposta da {model}: {result!r}")
+
+            if not result:
+                raise CategorizationError("Risposta vuota dal modello")
+
+            # Cerca array JSON
+            json_match = re.search(r'\[.*\]', result, re.DOTALL)
+            if json_match:
+                try:
+                    ids = json.loads(json_match.group(0))
+                    parsed = [int(i) for i in ids if isinstance(i, int)]
+                    if parsed:
+                        logger.info(f"✅ Categorie parse ({model}): {parsed}")
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+
+            raise CategorizationError(f"Risposta non valida: {result[:200]!r}")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Modello {model} fallito: {e}")
+            last_error = e
+            continue
+
+    # Se tutti i modelli falliscono
+    raise CategorizationError(f"Tutti i modelli falliti. Ultimo errore: {last_error}")

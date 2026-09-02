@@ -13,6 +13,7 @@ from reader import restart_reader
 from categorizer import build_category_tree
 
 MAX_MSG = 4000
+OFFERS_PER_PAGE = 5
 
 def esc(t):
     return html.escape(str(t)) if t else ""
@@ -20,12 +21,17 @@ def esc(t):
 def truncate(text, limit=4000):
     return text[:limit-3] + "..." if len(text) > limit else text
 
-def format_offer(m):
-    """Formatta un'offerta con link cliccabile al messaggio originale su Telegram."""
+def format_offer(m, max_len=1000):
     link = f"https://t.me/{m['channel_username']}/{m['message_id']}"
+    text = m['raw_text'] if m.get('raw_text') else ""
+    if max_len and len(text) > max_len:
+        text = text[:max_len] + "...\n\n(continua nel messaggio originale)"
+    timestamp = m['received_at'][:16] if m.get('received_at') else "Data sconosciuta"
     return (
-        f"📩 <a href=\"{link}\">@{esc(m['channel_username'])}</a> - {esc(m['received_at'][:16])}\n"
-        f"{esc(m['raw_text'][:250])}\n\n"
+        f"📩 <b>{timestamp}</b> - @{m['channel_username']}\n"
+        f"{text}\n\n"
+        f"🔗 <a href=\"{link}\">Vedi messaggio originale</a>\n"
+        f"——————————————————\n\n"
     )
 
 def main_menu():
@@ -37,6 +43,39 @@ def main_menu():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+# ---------- FUNZIONE DI PAGINAZIONE CORRETTA ----------
+def build_offers_text(msgs, page, title, context):
+    """Costruisce il testo e la tastiera per una pagina di offerte."""
+    total = len(msgs)
+    start = page * OFFERS_PER_PAGE
+    end = min(start + OFFERS_PER_PAGE, total)
+    page_msgs = msgs[start:end]
+    
+    text = f"{title}\n\n"
+    if not page_msgs:
+        text += "📭 Nessuna offerta in questa pagina."
+    else:
+        for m in page_msgs:
+            text += format_offer(m, max_len=1000)
+        total_pages = (total + OFFERS_PER_PAGE - 1) // OFFERS_PER_PAGE
+        text += f"\n📄 Pagina {page + 1} di {total_pages} ({total} offerte totali)"
+    
+    keyboard = []
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("◀️ Precedente", callback_data=f"offers_page_{page - 1}"))
+    if end < total:
+        nav_buttons.append(InlineKeyboardButton("▶️ Successiva", callback_data=f"offers_page_{page + 1}"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    # Pulsante per tornare indietro (usa il contesto salvato)
+    back_callback = context.user_data.get("offers_back_callback", "offers_menu")
+    keyboard.append([InlineKeyboardButton("↩️ Indietro", callback_data=back_callback)])
+    
+    return text, InlineKeyboardMarkup(keyboard)
+
+# ---------- HANDLER ----------
 async def start(update, context):
     await update.message.reply_text(
         "🤖 Hub Offerte\n\n"
@@ -87,7 +126,6 @@ async def cat_add(update, context):
     )
 
 async def cat_add_input(update, context):
-    """Ritorna True se ha gestito il messaggio (usato dal dispatcher unico)."""
     if context.user_data.get("waiting_cat"):
         text = update.message.text.strip()
         parts = text.split("|")
@@ -117,14 +155,14 @@ async def cat_del_confirm(update, context):
     delete_category(cat_id)
     await query.edit_message_text("🗑️ Categoria rimossa.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Indietro", callback_data="cat_menu")]]))
 
-# ---------- OFFERTE ----------
+# ---------- OFFERTE CON PAGINAZIONE ----------
 async def offers_menu(update, context):
     query = update.callback_query
     await query.answer()
+    context.user_data["offers_back_callback"] = "offers_menu"
     
     cats = get_categories()
     keyboard = []
-    # Macrocategorie (parent_id None), seguite subito dalle loro sottocategorie
     for c in cats:
         if not c["parent_id"]:
             keyboard.append([InlineKeyboardButton(f"📂 {c['name']}", callback_data=f"offers_cat_{c['id']}")])
@@ -144,6 +182,7 @@ async def offers_menu(update, context):
 async def show_offers_all(update, context, hours=None, days=None):
     query = update.callback_query
     await query.answer()
+    
     if hours:
         msgs = get_messages_recent(hours)
         title = "🆕 Tutte le offerte - Ultime 24h"
@@ -158,18 +197,21 @@ async def show_offers_all(update, context, hours=None, days=None):
         )
         return
     
-    text = f"{title}\n\n"
-    for m in msgs[:15]:
-        text += format_offer(m)
-    text = truncate(text)
-    keyboard = [[InlineKeyboardButton("↩️ Indietro", callback_data="offers_menu")]]
-    await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
+    context.user_data["offers_msgs"] = msgs
+    context.user_data["offers_page"] = 0
+    context.user_data["offers_back_callback"] = "offers_menu"
+    context.user_data["offers_type"] = "all"
+    
+    text, keyboard = build_offers_text(msgs, 0, title, context)
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
 
 async def offers_cat_show(update, context):
     query = update.callback_query
     await query.answer()
     cat_id = int(query.data.split("_")[2])
     cat_name = get_category_name(cat_id)
+    context.user_data["offers_cat_id"] = cat_id
+    context.user_data["offers_back_callback"] = f"offers_cat_{cat_id}"
     
     keyboard = [
         [InlineKeyboardButton("🆕 Ultime 24h", callback_data=f"offers_cat_{cat_id}_24h")],
@@ -204,12 +246,38 @@ async def offers_cat_period(update, context):
         )
         return
     
-    text = f"{title}\n\n"
-    for m in msgs[:15]:
-        text += format_offer(m)
-    text = truncate(text)
-    keyboard = [[InlineKeyboardButton("↩️ Indietro", callback_data=f"offers_cat_{cat_id}")]]
-    await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
+    context.user_data["offers_msgs"] = msgs
+    context.user_data["offers_page"] = 0
+    context.user_data["offers_back_callback"] = f"offers_cat_{cat_id}"
+    context.user_data["offers_type"] = f"cat_{cat_id}_{period}"
+    
+    text, keyboard = build_offers_text(msgs, 0, title, context)
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
+
+async def offers_page_navigate(update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    page = int(query.data.split("_")[2])
+    msgs = context.user_data.get("offers_msgs", [])
+    
+    if not msgs:
+        await query.edit_message_text("❌ Nessuna offerta disponibile.")
+        return
+    
+    title = "📄 Offerte"
+    if context.user_data.get("offers_type", "").startswith("cat_"):
+        cat_id = context.user_data.get("offers_cat_id")
+        cat_name = get_category_name(cat_id) if cat_id else "Categoria"
+        period = context.user_data.get("offers_type", "").split("_")[-1]
+        title = f"📂 {cat_name} - {'Ultime 24h' if period == '24h' else 'Questa settimana'}"
+    elif context.user_data.get("offers_type") == "all":
+        title = "📆 Tutte le offerte"
+    elif context.user_data.get("offers_type") == "search":
+        title = f"🔍 {context.user_data.get('search_keyword', 'Risultati')}"
+    
+    text, keyboard = build_offers_text(msgs, page, title, context)
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
 
 # ---------- CANALI ----------
 async def channels_menu(update, context):
@@ -243,7 +311,6 @@ async def ch_add(update, context):
     )
 
 async def ch_add_input(update, context):
-    """Ritorna True se ha gestito il messaggio (usato dal dispatcher unico)."""
     if context.user_data.get("waiting_ch"):
         username = update.message.text.strip().replace("@", "")
         add_channel(username)
@@ -257,13 +324,10 @@ async def ch_add_input(update, context):
     return False
 
 async def text_dispatch(update, context):
-    """Unico MessageHandler per il testo: smista in base al flag attivo,
-    evitando che due handler identici si facciano concorrenza."""
     if await cat_add_input(update, context):
         return
     if await ch_add_input(update, context):
         return
-    # Nessuna azione in attesa: ignora silenziosamente il messaggio libero
 
 async def cancel_command(update, context):
     context.user_data["waiting_cat"] = False
@@ -277,13 +341,20 @@ async def search_command(update, context):
         return
     keyword = " ".join(context.args)
     msgs = search_messages(keyword)
+    
     if not msgs:
         await update.message.reply_text(f"📭 Nessun risultato per '{esc(keyword)}'.")
         return
-    text = f"🔍 Risultati per '{esc(keyword)}'\n\n"
-    for m in msgs:
-        text += format_offer(m)
-    await update.message.reply_text(truncate(text), parse_mode="HTML", disable_web_page_preview=True)
+    
+    context.user_data["offers_msgs"] = msgs
+    context.user_data["offers_page"] = 0
+    context.user_data["offers_back_callback"] = "offers_menu"
+    context.user_data["offers_type"] = "search"
+    context.user_data["search_keyword"] = keyword
+    
+    title = f"🔍 Risultati per '{esc(keyword)}'"
+    text, keyboard = build_offers_text(msgs, 0, title, context)
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
 
 async def ch_del(update, context):
     query = update.callback_query
@@ -383,7 +454,6 @@ async def wipe_all_confirm(update, context):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Indietro", callback_data="settings_menu")]])
     )
 
-# ---------- RESTART ----------
 async def restart_command(update, context):
     await update.message.reply_text("🔄 Riavviando il reader...")
     await restart_reader()
@@ -404,6 +474,7 @@ def register_handlers(app):
     app.add_handler(CallbackQueryHandler(lambda u,c: show_offers_all(u,c,days=7), pattern="^offers_week_all$"))
     app.add_handler(CallbackQueryHandler(offers_cat_show, pattern="^offers_cat_\\d+$"))
     app.add_handler(CallbackQueryHandler(offers_cat_period, pattern="^offers_cat_\\d+_(24h|week)$"))
+    app.add_handler(CallbackQueryHandler(offers_page_navigate, pattern="^offers_page_\\d+$"))
     app.add_handler(CallbackQueryHandler(channels_menu, pattern="^channels_menu$"))
     app.add_handler(CallbackQueryHandler(ch_add, pattern="^ch_add$"))
     app.add_handler(CallbackQueryHandler(ch_del, pattern="^ch_del$"))
@@ -415,5 +486,4 @@ def register_handlers(app):
     app.add_handler(CallbackQueryHandler(wipe_all_confirm, pattern="^wipe_all_confirm$"))
     app.add_handler(CallbackQueryHandler(fav_menu, pattern="^fav_menu$"))
     app.add_handler(CallbackQueryHandler(fav_toggle, pattern="^fav_toggle_\\d+$"))
-    # Un solo handler per il testo libero: smista internamente in base allo stato
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_dispatch))
