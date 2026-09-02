@@ -9,7 +9,7 @@ from database import (
     get_category_name, delete_expired_messages, delete_all_messages,
     search_messages, get_favorite_category_ids, add_favorite, remove_favorite
 )
-from reader import restart_reader
+from reader import restart_reader, client, unmute_unarchive_and_leave_channel
 from categorizer import build_category_tree
 
 MAX_MSG = 4000
@@ -43,14 +43,11 @@ def main_menu():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ---------- FUNZIONE DI PAGINAZIONE CORRETTA ----------
 def build_offers_text(msgs, page, title, context):
-    """Costruisce il testo e la tastiera per una pagina di offerte."""
     total = len(msgs)
     start = page * OFFERS_PER_PAGE
     end = min(start + OFFERS_PER_PAGE, total)
     page_msgs = msgs[start:end]
-    
     text = f"{title}\n\n"
     if not page_msgs:
         text += "📭 Nessuna offerta in questa pagina."
@@ -59,7 +56,6 @@ def build_offers_text(msgs, page, title, context):
             text += format_offer(m, max_len=1000)
         total_pages = (total + OFFERS_PER_PAGE - 1) // OFFERS_PER_PAGE
         text += f"\n📄 Pagina {page + 1} di {total_pages} ({total} offerte totali)"
-    
     keyboard = []
     nav_buttons = []
     if page > 0:
@@ -68,14 +64,10 @@ def build_offers_text(msgs, page, title, context):
         nav_buttons.append(InlineKeyboardButton("▶️ Successiva", callback_data=f"offers_page_{page + 1}"))
     if nav_buttons:
         keyboard.append(nav_buttons)
-    
-    # Pulsante per tornare indietro (usa il contesto salvato)
     back_callback = context.user_data.get("offers_back_callback", "offers_menu")
     keyboard.append([InlineKeyboardButton("↩️ Indietro", callback_data=back_callback)])
-    
     return text, InlineKeyboardMarkup(keyboard)
 
-# ---------- HANDLER ----------
 async def start(update, context):
     await update.message.reply_text(
         "🤖 Hub Offerte\n\n"
@@ -155,12 +147,11 @@ async def cat_del_confirm(update, context):
     delete_category(cat_id)
     await query.edit_message_text("🗑️ Categoria rimossa.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Indietro", callback_data="cat_menu")]]))
 
-# ---------- OFFERTE CON PAGINAZIONE ----------
+# ---------- OFFERTE ----------
 async def offers_menu(update, context):
     query = update.callback_query
     await query.answer()
     context.user_data["offers_back_callback"] = "offers_menu"
-    
     cats = get_categories()
     keyboard = []
     for c in cats:
@@ -169,11 +160,9 @@ async def offers_menu(update, context):
             for sub in cats:
                 if sub["parent_id"] == c["id"]:
                     keyboard.append([InlineKeyboardButton(f"　└ {sub['name']}", callback_data=f"offers_cat_{sub['id']}")])
-
     keyboard.append([InlineKeyboardButton("🆕 Tutte (ultime 24h)", callback_data="offers_24h_all")])
     keyboard.append([InlineKeyboardButton("📆 Tutte (questa settimana)", callback_data="offers_week_all")])
     keyboard.append([InlineKeyboardButton("🏠 Menu", callback_data="menu")])
-    
     await query.edit_message_text(
         "🔥 Scegli una categoria o visualizza tutte le offerte:",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -182,26 +171,22 @@ async def offers_menu(update, context):
 async def show_offers_all(update, context, hours=None, days=None):
     query = update.callback_query
     await query.answer()
-    
     if hours:
         msgs = get_messages_recent(hours)
         title = "🆕 Tutte le offerte - Ultime 24h"
     else:
         msgs = get_messages_week()
         title = "📆 Tutte le offerte - Questa settimana"
-    
     if not msgs:
         await query.edit_message_text(
             "📭 Nessun messaggio.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Indietro", callback_data="offers_menu")]])
         )
         return
-    
     context.user_data["offers_msgs"] = msgs
     context.user_data["offers_page"] = 0
     context.user_data["offers_back_callback"] = "offers_menu"
     context.user_data["offers_type"] = "all"
-    
     text, keyboard = build_offers_text(msgs, 0, title, context)
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
 
@@ -212,13 +197,11 @@ async def offers_cat_show(update, context):
     cat_name = get_category_name(cat_id)
     context.user_data["offers_cat_id"] = cat_id
     context.user_data["offers_back_callback"] = f"offers_cat_{cat_id}"
-    
     keyboard = [
         [InlineKeyboardButton("🆕 Ultime 24h", callback_data=f"offers_cat_{cat_id}_24h")],
         [InlineKeyboardButton("📆 Questa settimana", callback_data=f"offers_cat_{cat_id}_week")],
         [InlineKeyboardButton("↩️ Indietro", callback_data="offers_menu")]
     ]
-    
     await query.edit_message_text(
         f"📂 {cat_name}\n\nScegli il periodo:",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -231,40 +214,33 @@ async def offers_cat_period(update, context):
     cat_id = int(parts[2])
     period = parts[3]
     cat_name = get_category_name(cat_id)
-    
     if period == "24h":
         msgs = get_messages_by_category(cat_id, hours=24)
         title = f"🆕 {cat_name} - Ultime 24h"
     else:
         msgs = get_messages_by_category_week(cat_id)
         title = f"📆 {cat_name} - Questa settimana"
-    
     if not msgs:
         await query.edit_message_text(
             f"📭 Nessun messaggio in {cat_name}.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Indietro", callback_data=f"offers_cat_{cat_id}")]])
         )
         return
-    
     context.user_data["offers_msgs"] = msgs
     context.user_data["offers_page"] = 0
     context.user_data["offers_back_callback"] = f"offers_cat_{cat_id}"
     context.user_data["offers_type"] = f"cat_{cat_id}_{period}"
-    
     text, keyboard = build_offers_text(msgs, 0, title, context)
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
 
 async def offers_page_navigate(update, context):
     query = update.callback_query
     await query.answer()
-    
     page = int(query.data.split("_")[2])
     msgs = context.user_data.get("offers_msgs", [])
-    
     if not msgs:
         await query.edit_message_text("❌ Nessuna offerta disponibile.")
         return
-    
     title = "📄 Offerte"
     if context.user_data.get("offers_type", "").startswith("cat_"):
         cat_id = context.user_data.get("offers_cat_id")
@@ -275,7 +251,6 @@ async def offers_page_navigate(update, context):
         title = "📆 Tutte le offerte"
     elif context.user_data.get("offers_type") == "search":
         title = f"🔍 {context.user_data.get('search_keyword', 'Risultati')}"
-    
     text, keyboard = build_offers_text(msgs, page, title, context)
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
 
@@ -290,7 +265,6 @@ async def channels_menu(update, context):
             text += f"• @{esc(ch['username'])}\n"
     else:
         text += "Nessun canale aggiunto.\n"
-    
     keyboard = [
         [InlineKeyboardButton("➕ Aggiungi", callback_data="ch_add")],
         [InlineKeyboardButton("🗑️ Rimuovi", callback_data="ch_del")],
@@ -341,17 +315,14 @@ async def search_command(update, context):
         return
     keyword = " ".join(context.args)
     msgs = search_messages(keyword)
-    
     if not msgs:
         await update.message.reply_text(f"📭 Nessun risultato per '{esc(keyword)}'.")
         return
-    
     context.user_data["offers_msgs"] = msgs
     context.user_data["offers_page"] = 0
     context.user_data["offers_back_callback"] = "offers_menu"
     context.user_data["offers_type"] = "search"
     context.user_data["search_keyword"] = keyword
-    
     title = f"🔍 Risultati per '{esc(keyword)}'"
     text, keyboard = build_offers_text(msgs, 0, title, context)
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
@@ -371,8 +342,23 @@ async def ch_del_confirm(update, context):
     query = update.callback_query
     await query.answer()
     username = query.data[len("ch_del_"):]
+
+    # Lascia il canale e toglie archivio/muto (se client disponibile)
+    if client:
+        try:
+            entity = await client.get_entity(username)
+            await unmute_unarchive_and_leave_channel(client, entity)
+        except Exception as e:
+            print(f"⚠️ Errore nel lasciare/ripristinare @{username}: {e}")
+    else:
+        print("⚠️ Client non disponibile, impossibile lasciare il canale.")
+
     delete_channel(username)
-    await query.edit_message_text(f"🗑️ Canale @{username} rimosso.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Indietro", callback_data="channels_menu")]]))
+    await query.edit_message_text(
+        f"🗑️ Canale @{username} rimosso e account lasciato.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Indietro", callback_data="channels_menu")]])
+    )
+    await restart_reader()
 
 async def reader_restart_callback(update, context):
     query = update.callback_query
