@@ -5,7 +5,6 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
-from telethon.tl.functions.messages import ArchiveRequest, UnarchiveRequest
 from telethon.tl.types import InputPeerNotifySettings
 from telethon.errors import UserAlreadyParticipantError, ChannelPrivateError, FloodWaitError
 from config import API_ID, API_HASH, PHONE_NUMBER, TELETHON_SESSION
@@ -45,8 +44,8 @@ async def mute_and_archive_channel(client, entity):
             )
         ))
         logger.info(f"🔇 Canale @{entity.username} messo in muto")
-        # Archivia
-        await client(ArchiveRequest([entity]))
+        # Archivia usando edit_folder (folder_id=1 = archivio)
+        await client.edit_folder(entity, folder_id=1)
         logger.info(f"📦 Canale @{entity.username} archiviato")
     except Exception as e:
         logger.warning(f"⚠️ Errore durante mute/archiviazione per @{entity.username}: {e}")
@@ -64,8 +63,8 @@ async def unmute_unarchive_and_leave_channel(client, entity):
             )
         ))
         logger.info(f"🔊 Canale @{entity.username} smutato")
-        # Togli dall'archivio
-        await client(UnarchiveRequest([entity]))
+        # Togli dall'archivio (folder_id=0)
+        await client.edit_folder(entity, folder_id=0)
         logger.info(f"📤 Canale @{entity.username} tolto dall'archivio")
         # Lascia il canale
         await client(LeaveChannelRequest(entity))
@@ -130,7 +129,7 @@ async def start_reader():
                 if event.message.chat and hasattr(event.message.chat, 'username'):
                     chat_name = event.message.chat.username or str(event.message.chat.id)
                     if chat_name in channel_usernames:
-                        # già gestito dall'altro handler, evitiamo duplicati
+                        # già gestito dall'altro handler
                         return
                     print(f"🐞 DEBUG - Messaggio da altra chat: @{chat_name}: {event.message.text[:50] if event.message.text else 'no text'}...")
             print(f"👂 In ascolto attivo su {len(chat_entities)} canali.")
