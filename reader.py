@@ -33,27 +33,31 @@ def _esc(t):
 
 async def mute_and_archive_channel(client, entity):
     """Mette in muto e archivia un canale."""
+    # Muto con valore valido (max int32)
     try:
-        # Muto
         await client(UpdateNotifySettingsRequest(
             peer=entity,
             settings=InputPeerNotifySettings(
                 show_previews=False,
                 silent=True,
-                mute_until=1 << 31
+                mute_until=2147483647  # massimo valore con segno a 32 bit
             )
         ))
         logger.info(f"🔇 Canale @{entity.username} messo in muto")
-        # Archivia usando edit_folder (folder_id=1 = archivio)
+    except Exception as e:
+        logger.warning(f"⚠️ Errore durante mute per @{entity.username}: {e}")
+    
+    # Archivia
+    try:
         await client.edit_folder(entity, folder_id=1)
         logger.info(f"📦 Canale @{entity.username} archiviato")
     except Exception as e:
-        logger.warning(f"⚠️ Errore durante mute/archiviazione per @{entity.username}: {e}")
+        logger.warning(f"⚠️ Errore durante archiviazione per @{entity.username}: {e}")
 
 async def unmute_unarchive_and_leave_channel(client, entity):
     """Smuta, toglie dall'archivio e lascia il canale."""
+    # Smuta
     try:
-        # Smuta
         await client(UpdateNotifySettingsRequest(
             peer=entity,
             settings=InputPeerNotifySettings(
@@ -63,14 +67,22 @@ async def unmute_unarchive_and_leave_channel(client, entity):
             )
         ))
         logger.info(f"🔊 Canale @{entity.username} smutato")
-        # Togli dall'archivio (folder_id=0)
+    except Exception as e:
+        logger.warning(f"⚠️ Errore durante smuto per @{entity.username}: {e}")
+    
+    # Togli dall'archivio
+    try:
         await client.edit_folder(entity, folder_id=0)
         logger.info(f"📤 Canale @{entity.username} tolto dall'archivio")
-        # Lascia il canale
+    except Exception as e:
+        logger.warning(f"⚠️ Errore durante tolto archivio per @{entity.username}: {e}")
+    
+    # Lascia il canale
+    try:
         await client(LeaveChannelRequest(entity))
         logger.info(f"🚪 Canale @{entity.username} abbandonato")
     except Exception as e:
-        logger.warning(f"⚠️ Errore durante smuto/togli archivio/lascia per @{entity.username}: {e}")
+        logger.warning(f"⚠️ Errore durante leave per @{entity.username}: {e}")
 
 async def start_reader():
     global client
@@ -123,13 +135,11 @@ async def start_reader():
             @client.on(events.NewMessage(chats=chat_entities))
             async def handler(event):
                 await process_message(event.message)
-            # Debug: stampa tutti i messaggi ricevuti dai canali monitorati
             @client.on(events.NewMessage)
             async def debug_handler(event):
                 if event.message.chat and hasattr(event.message.chat, 'username'):
                     chat_name = event.message.chat.username or str(event.message.chat.id)
                     if chat_name in channel_usernames:
-                        # già gestito dall'altro handler
                         return
                     print(f"🐞 DEBUG - Messaggio da altra chat: @{chat_name}: {event.message.text[:50] if event.message.text else 'no text'}...")
             print(f"👂 In ascolto attivo su {len(chat_entities)} canali.")
