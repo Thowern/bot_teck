@@ -1,0 +1,34 @@
+# Ambiente virtuale
+venv/
+env/
+.venv/
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# File di sessione Telethon
+session.session
+*.session
+
+# File di configurazione sensibili
+.env
+.env.local
+.env.*.local
+
+# Database locali (se usi SQLite)
+*.db
+*.sqlite
+*.sqlite3
+
+# File di log
+*.log
+
+# File di sistema
+.DS_Store
+Thumbs.db
+
+# File di test
+*.tmp
