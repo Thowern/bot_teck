@@ -32,31 +32,45 @@ def _esc(t):
     return html_lib.escape(str(t)) if t else ""
 
 async def mute_and_archive_channel(client, entity):
-    """Mette in muto e archivia un canale."""
-    # Muto con valore valido (max int32)
+    """Mette in muto e archivia un canale usando metodi stabili di Telethon 1.44.0."""
+    # Ottieni un nome visualizzabile per i log
+    username = getattr(entity, 'username', None) or str(entity.id)
+    
+    # 1. Muto (disabilita notifiche)
     try:
         await client(UpdateNotifySettingsRequest(
             peer=entity,
             settings=InputPeerNotifySettings(
                 show_previews=False,
                 silent=True,
-                mute_until=2147483647  # massimo valore con segno a 32 bit
+                mute_until=2147483647  # Massimo valore valido per int32
             )
         ))
-        logger.info(f"🔇 Canale @{entity.username} messo in muto")
+        logger.info(f"🔇 Canale {username} messo in muto")
     except Exception as e:
-        logger.warning(f"⚠️ Errore durante mute per @{entity.username}: {e}")
+        logger.warning(f"⚠️ Errore durante mute per {username}: {e}")
     
-    # Archivia
+    # 2. Archivia (sposta nella sezione "Archiviati")
     try:
-        await client.edit_folder(entity, folder_id=1)
-        logger.info(f"📦 Canale @{entity.username} archiviato")
+        # Metodo amichevole e stabile (Telethon 1.44.0+)
+        await client.edit_folder(entity, folder=1)
+        logger.info(f"📦 Canale {username} archiviato")
+    except AttributeError:
+        # Fallback per versioni precedenti (se edit_folder non esiste)
+        try:
+            from telethon.tl.functions.messages import ArchiveRequest
+            await client(ArchiveRequest([entity]))
+            logger.info(f"📦 Canale {username} archiviato (fallback)")
+        except Exception as e:
+            logger.warning(f"⚠️ Errore durante archiviazione (fallback) per {username}: {e}")
     except Exception as e:
-        logger.warning(f"⚠️ Errore durante archiviazione per @{entity.username}: {e}")
+        logger.warning(f"⚠️ Errore durante archiviazione per {username}: {e}")
 
 async def unmute_unarchive_and_leave_channel(client, entity):
     """Smuta, toglie dall'archivio e lascia il canale."""
-    # Smuta
+    username = getattr(entity, 'username', None) or str(entity.id)
+    
+    # 1. Smuta
     try:
         await client(UpdateNotifySettingsRequest(
             peer=entity,
@@ -66,23 +80,30 @@ async def unmute_unarchive_and_leave_channel(client, entity):
                 mute_until=0
             )
         ))
-        logger.info(f"🔊 Canale @{entity.username} smutato")
+        logger.info(f"🔊 Canale {username} smutato")
     except Exception as e:
-        logger.warning(f"⚠️ Errore durante smuto per @{entity.username}: {e}")
+        logger.warning(f"⚠️ Errore durante smuto per {username}: {e}")
     
-    # Togli dall'archivio
+    # 2. Togli dall'archivio
     try:
-        await client.edit_folder(entity, folder_id=0)
-        logger.info(f"📤 Canale @{entity.username} tolto dall'archivio")
+        await client.edit_folder(entity, folder=0)
+        logger.info(f"📤 Canale {username} tolto dall'archivio")
+    except AttributeError:
+        try:
+            from telethon.tl.functions.messages import UnarchiveRequest
+            await client(UnarchiveRequest([entity]))
+            logger.info(f"📤 Canale {username} tolto dall'archivio (fallback)")
+        except Exception as e:
+            logger.warning(f"⚠️ Errore durante tolto archivio (fallback) per {username}: {e}")
     except Exception as e:
-        logger.warning(f"⚠️ Errore durante tolto archivio per @{entity.username}: {e}")
+        logger.warning(f"⚠️ Errore durante tolto archivio per {username}: {e}")
     
-    # Lascia il canale
+    # 3. Lascia il canale
     try:
         await client(LeaveChannelRequest(entity))
-        logger.info(f"🚪 Canale @{entity.username} abbandonato")
+        logger.info(f"🚪 Canale {username} abbandonato")
     except Exception as e:
-        logger.warning(f"⚠️ Errore durante leave per @{entity.username}: {e}")
+        logger.warning(f"⚠️ Errore durante leave per {username}: {e}")
 
 async def start_reader():
     global client
