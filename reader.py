@@ -5,7 +5,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
-from telethon.tl.functions.messages import ArchiveMessagesRequest, UnarchiveMessagesRequest
+from telethon.tl.functions.messages import ArchiveRequest, UnarchiveRequest
 from telethon.tl.types import InputPeerNotifySettings
 from telethon.errors import UserAlreadyParticipantError, ChannelPrivateError, FloodWaitError
 from config import API_ID, API_HASH, PHONE_NUMBER, TELETHON_SESSION
@@ -45,8 +45,8 @@ async def mute_and_archive_channel(client, entity):
             )
         ))
         logger.info(f"🔇 Canale @{entity.username} messo in muto")
-        # Archivia (usando ArchiveMessagesRequest)
-        await client(ArchiveMessagesRequest([entity]))
+        # Archivia
+        await client(ArchiveRequest([entity]))
         logger.info(f"📦 Canale @{entity.username} archiviato")
     except Exception as e:
         logger.warning(f"⚠️ Errore durante mute/archiviazione per @{entity.username}: {e}")
@@ -64,8 +64,8 @@ async def unmute_unarchive_and_leave_channel(client, entity):
             )
         ))
         logger.info(f"🔊 Canale @{entity.username} smutato")
-        # Togli dall'archivio (UnarchiveMessagesRequest)
-        await client(UnarchiveMessagesRequest([entity]))
+        # Togli dall'archivio
+        await client(UnarchiveRequest([entity]))
         logger.info(f"📤 Canale @{entity.username} tolto dall'archivio")
         # Lascia il canale
         await client(LeaveChannelRequest(entity))
@@ -124,7 +124,7 @@ async def start_reader():
             @client.on(events.NewMessage(chats=chat_entities))
             async def handler(event):
                 await process_message(event.message)
-            # Debug: stampa tutti i messaggi ricevuti (solo per canali monitorati)
+            # Debug: stampa tutti i messaggi ricevuti dai canali monitorati
             @client.on(events.NewMessage)
             async def debug_handler(event):
                 if event.message.chat and hasattr(event.message.chat, 'username'):
